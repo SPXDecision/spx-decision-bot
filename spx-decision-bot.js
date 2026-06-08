@@ -11,7 +11,7 @@ const FINNHUB_API_KEY = process.env.FINNHUB_API_KEY;
 const bot = new TelegramBot(BOT_TOKEN, { polling: false });
 
 async function getSPXPrice() {
-  const url = `https://finnhub.io/api/v1/quote?symbol=^SPX&token=${FINNHUB_API_KEY}`;
+  const url = `https://finnhub.io/api/v1/quote?symbol=SPY&token=${FINNHUB_API_KEY}`;
   const res = await axios.get(url, { timeout: 30000 });
   return Number(res.data?.c);
 }
