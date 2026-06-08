@@ -728,6 +728,8 @@ async function runCycle() {
     const spxPrice = await getSPXPrice();
     const contracts = await getSPXOptionsChain();
     const analysis = analyzeSPX(contracts);
+    
+    console.log('Analysis:', analysis);
 
     const activeTrade = await getActiveTrade();
 
