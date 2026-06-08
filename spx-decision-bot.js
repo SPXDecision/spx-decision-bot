@@ -784,7 +784,10 @@ async function runCycle() {
 
     console.log('New trade saved:', savedTrade.id);
   } catch (err) {
-    console.error(err?.response?.data || err.message);
+    console.error('ERROR MESSAGE:', err?.message);
+console.error('ERROR DATA:', err?.response?.data);
+console.error('ERROR STACK:', err?.stack);
+console.error(err);
 
     try {
       await bot.sendMessage(
