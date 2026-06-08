@@ -7,6 +7,7 @@ const { createClient } = require('@supabase/supabase-js');
 const BOT_TOKEN = process.env.BOT_TOKEN;
 const ADMIN_CHAT_ID = process.env.ADMIN_CHAT_ID;
 const MASSIVE_API_KEY = process.env.MASSIVE_API_KEY;
+const TWELVE_DATA_API_KEY = process.env.TWELVE_DATA_API_KEY;
 
 const SUPABASE_URL = process.env.SUPABASE_URL;
 const SUPABASE_SERVICE_ROLE_KEY = process.env.SUPABASE_SERVICE_ROLE_KEY;
@@ -17,6 +18,7 @@ const MIN_SCORE = Number(process.env.MIN_SCORE || 80);
 const PROFIT_STEP = Number(process.env.PROFIT_STEP || 0.30);
 const OPTION_STOP_PCT = Number(process.env.OPTION_STOP_PCT || 25);
 const SIGNAL_COOLDOWN_MS = Number(process.env.SIGNAL_COOLDOWN_MS || 5 * 60 * 1000);
+const MAX_PAGES = Number(process.env.MAX_PAGES || 20);
 
 const bot = new TelegramBot(BOT_TOKEN, { polling: false });
 
@@ -60,28 +62,28 @@ function getDateRange() {
 }
 
 async function getSPXPrice() {
-  const url =
-    'https://query1.finance.yahoo.com/v8/finance/chart/%5EGSPC?interval=1m&range=1d';
+  const symbols = ['SPX', 'SPX500'];
 
-  const res = await axios.get(url, {
-    timeout: 30000,
-    headers: {
-      'User-Agent': 'Mozilla/5.0',
-      'Accept': 'application/json'
+  for (const symbol of symbols) {
+    try {
+      const url =
+        `https://api.twelvedata.com/price?symbol=${symbol}` +
+        `&apikey=${TWELVE_DATA_API_KEY}`;
+
+      const res = await axios.get(url, { timeout: 15000 });
+      const price = toNumber(res.data?.price);
+
+      if (price && price > 1000) {
+        return price;
+      }
+
+      console.log(`TwelveData ${symbol} response:`, res.data);
+    } catch (err) {
+      console.error(`TwelveData ${symbol} failed:`, err?.message);
     }
-  });
-
-  const result = res.data?.chart?.result?.[0];
-
-  const price =
-    toNumber(result?.meta?.regularMarketPrice) ||
-    toNumber(result?.meta?.previousClose);
-
-  if (!price) {
-    throw new Error('Yahoo SPX price unavailable');
   }
 
-  return price;
+  throw new Error('Twelve Data SPX price unavailable');
 }
 
 function getContractType(c) {
@@ -139,7 +141,6 @@ function getOptionPrice(c) {
 
   return null;
 }
-
 function getSpreadPct(c) {
   const bid = getBid(c);
   const ask = getAsk(c);
@@ -152,7 +153,6 @@ function getSpreadPct(c) {
 
 async function getSPXOptionsChain() {
   const { fromDate, toDate } = getDateRange();
-  const MAX_PAGES = Number(process.env.MAX_PAGES || 20);
 
   let url =
     `https://api.massive.com/v3/snapshot/options/I:SPX` +
@@ -182,8 +182,11 @@ async function getSPXOptionsChain() {
     await sleep(150);
   }
 
+  console.log(`Total contracts loaded: ${allContracts.length}`);
+
   return allContracts;
 }
+
 function analyzeSPX(contracts) {
   const usable = contracts.filter(c => {
     const type = getContractType(c);
@@ -260,10 +263,14 @@ function analyzeSPX(contracts) {
     rows.slice().sort((a, b) => b.totalGammaPower - a.totalGammaPower)[0] || null;
 
   const topCallLiquidity =
-    rows.filter(r => r.callVolume > 0).sort((a, b) => b.callVolume - a.callVolume).slice(0, 3);
+    rows.filter(r => r.callVolume > 0)
+      .sort((a, b) => b.callVolume - a.callVolume)
+      .slice(0, 3);
 
   const topPutLiquidity =
-    rows.filter(r => r.putVolume > 0).sort((a, b) => b.putVolume - a.putVolume).slice(0, 3);
+    rows.filter(r => r.putVolume > 0)
+      .sort((a, b) => b.putVolume - a.putVolume)
+      .slice(0, 3);
 
   const totalCallGamma = rows.reduce((sum, r) => sum + r.callGammaPower, 0);
   const totalPutGamma = rows.reduce((sum, r) => sum + r.putGammaPower, 0);
@@ -290,8 +297,7 @@ function analyzeSPX(contracts) {
     decisionHigh = Math.max(callWall, putWall);
     isTightZone = true;
   }
-
-  return {
+    return {
     usableCount: usable.length,
     strikeCount: rows.length,
     netGamma,
@@ -388,6 +394,7 @@ function buildTradeDecision(spxPrice, a) {
     reasons
   };
 }
+
 function selectBestOptionContract(contracts, side, spxPrice) {
   const wantedType = side === 'CALL' ? 'call' : 'put';
 
@@ -458,7 +465,7 @@ async function getActiveTrade() {
   return data || null;
 }
 
-async function saveNewTrade(signal, optionData, spxPrice, analysis) {
+async function saveNewTrade(signal, optionData, spxPrice) {
   const optionEntry = optionData.price;
   const stopPrice = optionEntry * (1 - OPTION_STOP_PCT / 100);
 
@@ -485,8 +492,7 @@ async function saveNewTrade(signal, optionData, spxPrice, analysis) {
 
     close_reason: null
   };
-
-  const { data, error } = await supabase
+    const { data, error } = await supabase
     .from('spx_decision_trades')
     .insert(row)
     .select()
@@ -593,6 +599,7 @@ ${fmt(currentPrice, 2)}
 +${fmt(profitPct, 1)}%`
   );
 }
+
 function buildStopMessage(trade, currentPrice, maxProfitAmount, maxProfitPct) {
   const hadProfit = maxProfitAmount > 0;
 
@@ -736,9 +743,7 @@ async function runCycle() {
 
     const signal = buildTradeDecision(spxPrice, analysis);
 
-    console.log(
-      `SPX ${spxPrice} | Signal: ${signal.side} | Score: ${signal.score}`
-    );
+    console.log(`SPX ${spxPrice} | Signal: ${signal.side} | Score: ${signal.score}`);
 
     if (signal.side === 'NO_TRADE') {
       console.log(signal.reason);
@@ -753,47 +758,33 @@ async function runCycle() {
       return;
     }
 
-    const optionData = selectBestOptionContract(
-      contracts,
-      signal.side,
-      spxPrice
-    );
+    const optionData = selectBestOptionContract(contracts, signal.side, spxPrice);
 
     if (!optionData) {
       console.log('No suitable option contract found.');
       return;
     }
 
-    const savedTrade = await saveNewTrade(
-      signal,
-      optionData,
-      spxPrice,
-      analysis
-    );
+    const savedTrade = await saveNewTrade(signal, optionData, spxPrice);
 
     lastSignalKey = signalKey;
     lastSignalAt = now;
 
-    const msg = buildTradeMessage(
-      signal,
-      spxPrice,
-      analysis,
-      optionData
+    await bot.sendMessage(
+      ADMIN_CHAT_ID,
+      buildTradeMessage(signal, spxPrice, analysis, optionData)
     );
-
-    await bot.sendMessage(ADMIN_CHAT_ID, msg);
 
     console.log('New trade saved:', savedTrade.id);
   } catch (err) {
     console.error('ERROR MESSAGE:', err?.message);
-console.error('ERROR DATA:', err?.response?.data);
-console.error('ERROR STACK:', err?.stack);
-console.error(err);
+    console.error('ERROR DATA:', err?.response?.data);
+    console.error('ERROR STACK:', err?.stack);
 
     try {
       await bot.sendMessage(
         ADMIN_CHAT_ID,
-        `❌ فشل SPX Decision Bot\n\n${err?.response?.data?.error || err.message}`
+        `❌ فشل SPX Decision Bot\n\n${err?.message || 'Unknown Error'}`
       );
     } catch {}
   } finally {
