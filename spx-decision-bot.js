@@ -152,6 +152,7 @@ function getSpreadPct(c) {
 
 async function getSPXOptionsChain() {
   const { fromDate, toDate } = getDateRange();
+  const MAX_PAGES = Number(process.env.MAX_PAGES || 20);
 
   let url =
     `https://api.massive.com/v3/snapshot/options/I:SPX` +
@@ -163,7 +164,7 @@ async function getSPXOptionsChain() {
   const allContracts = [];
   let page = 1;
 
-  while (url) {
+  while (url && page <= MAX_PAGES) {
     console.log(`Fetching SPX page ${page}...`);
 
     const res = await axios.get(url, { timeout: 90000 });
