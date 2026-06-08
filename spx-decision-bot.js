@@ -168,6 +168,7 @@ async function getSPXOptionsChain() {
     console.log(`Fetching SPX page ${page}...`);
 
     const res = await axios.get(url, { timeout: 90000 });
+    console.log('TWELVE RESPONSE:', JSON.stringify(res.data));
     const results = res.data?.results || [];
 
     allContracts.push(...results);
