@@ -60,22 +60,28 @@ function getDateRange() {
 }
 
 async function getSPXPrice() {
-  const url = 'https://stooq.com/q/l/?s=%5Espx&i=d';
+  const url =
+    'https://query1.finance.yahoo.com/v8/finance/chart/%5EGSPC?interval=1m&range=1d';
 
   const res = await axios.get(url, {
     timeout: 30000,
-    headers: { 'User-Agent': 'Mozilla/5.0' }
+    headers: {
+      'User-Agent': 'Mozilla/5.0',
+      'Accept': 'application/json'
+    }
   });
 
-  const text = String(res.data || '').trim();
-  const lines = text.split('\n');
+  const result = res.data?.chart?.result?.[0];
 
-  if (lines.length < 2) return null;
+  const price =
+    toNumber(result?.meta?.regularMarketPrice) ||
+    toNumber(result?.meta?.previousClose);
 
-  const parts = lines[1].split(',');
-  const close = Number(parts[6]);
+  if (!price) {
+    throw new Error('Yahoo SPX price unavailable');
+  }
 
-  return Number.isFinite(close) ? close : null;
+  return price;
 }
 
 function getContractType(c) {
