@@ -1,0 +1,13 @@
+{
+  "name": "spx-decision-bot",
+  "version": "1.0.0",
+  "main": "spx-decision-bot.js",
+  "scripts": {
+    "start": "node spx-decision-bot.js"
+  },
+  "dependencies": {
+    "axios": "^1.7.9",
+    "dotenv": "^16.4.7",
+    "node-telegram-bot-api": "^0.66.0"
+  }
+}
