@@ -7,7 +7,7 @@ const { createClient } = require('@supabase/supabase-js');
 const BOT_TOKEN = process.env.BOT_TOKEN;
 const ADMIN_CHAT_ID = process.env.ADMIN_CHAT_ID;
 const MASSIVE_API_KEY = process.env.MASSIVE_API_KEY;
-const TWELVE_DATA_API_KEY = process.env.TWELVE_DATA_API_KEY;
+const FMP_API_KEY = process.env.FMP_API_KEY;
 
 const SUPABASE_URL = process.env.SUPABASE_URL;
 const SUPABASE_SERVICE_ROLE_KEY = process.env.SUPABASE_SERVICE_ROLE_KEY;
@@ -62,28 +62,24 @@ function getDateRange() {
 }
 
 async function getSPXPrice() {
-  const symbols = ['SPX', 'SPX500'];
+  const url =
+    `https://financialmodelingprep.com/stable/quote?symbol=%5EGSPC&apikey=${FMP_API_KEY}`;
 
-  for (const symbol of symbols) {
-    try {
-      const url =
-        `https://api.twelvedata.com/price?symbol=${symbol}` +
-        `&apikey=${TWELVE_DATA_API_KEY}`;
+  const res = await axios.get(url, {
+    timeout: 30000
+  });
 
-      const res = await axios.get(url, { timeout: 15000 });
-      const price = toNumber(res.data?.price);
+  const row = res.data?.[0];
 
-      if (price && price > 1000) {
-        return price;
-      }
+  const price =
+    Number(row?.price) ||
+    Number(row?.previousClose);
 
-      console.log(`TwelveData ${symbol} response:`, res.data);
-    } catch (err) {
-      console.error(`TwelveData ${symbol} failed:`, err?.message);
-    }
+  if (!price) {
+    throw new Error('FMP SPX price unavailable');
   }
 
-  throw new Error('Twelve Data SPX price unavailable');
+  return price;
 }
 
 function getContractType(c) {
