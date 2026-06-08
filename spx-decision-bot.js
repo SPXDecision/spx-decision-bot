@@ -16,20 +16,20 @@ function toNumber(v) {
 
 async function getSPXPrice() {
   const url =
-    `https://api.massive.com/v3/snapshot/indices` +
-    `?ticker=I:SPX&apiKey=${MASSIVE_API_KEY}`;
+    'https://query1.finance.yahoo.com/v8/finance/chart/%5EGSPC?interval=1m&range=1d';
 
-  const res = await axios.get(url, { timeout: 30000 });
+  const res = await axios.get(url, {
+    timeout: 30000,
+    headers: {
+      'User-Agent': 'Mozilla/5.0'
+    }
+  });
 
-  console.log('SPX price response:', JSON.stringify(res.data).slice(0, 1000));
-
-  const item = res.data?.results?.[0];
+  const result = res.data?.chart?.result?.[0];
 
   const price =
-    toNumber(item?.value) ||
-    toNumber(item?.session?.close) ||
-    toNumber(item?.session?.previous_close) ||
-    toNumber(item?.last_trade?.price);
+    toNumber(result?.meta?.regularMarketPrice) ||
+    toNumber(result?.meta?.previousClose);
 
   return price;
 }
