@@ -312,6 +312,8 @@ function analyzeSPX(contracts) {
 }
 
 function buildTradeDecision(a) {
+console.log('NEW BUILDTRADEDECISION RUNNING');
+  
   let side = 'NO_TRADE';
   let score = 0;
   const reasons = [];
