@@ -920,6 +920,11 @@ async function runCycle() {
     const analysis = analyzeSPX(contracts);
 
     console.log('Analysis:', analysis);
+    console.log('CALL FLOW =', analysis.callFlowPct);
+console.log('PUT FLOW =', analysis.putFlowPct);
+console.log('NET GAMMA =', analysis.netGamma);
+console.log('TOP CALL =', analysis.topCallLiquidity?.[0]);
+console.log('TOP PUT =', analysis.topPutLiquidity?.[0]);
 
     const existingTrade = await getTradeByStatuses(['watching', 'active']);
 
