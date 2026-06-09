@@ -1,9 +1,9 @@
 {
   "name": "spx-gamma-bot",
   "version": "1.0.0",
-  "main": "spx-gamma-bot.js",
+  "main": "spx-decision-bot.js",
   "scripts": {
-    "start": "node spx-gamma-bot.js"
+    "start": "node spx-decision-bot.js"
   },
   "dependencies": {
     "@supabase/supabase-js": "^2.45.4",
