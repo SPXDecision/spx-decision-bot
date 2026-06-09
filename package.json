@@ -1,14 +1,15 @@
 {
-  "name": "spx-decision-bot",
+  "name": "spx-gamma-bot",
   "version": "1.0.0",
-  "main": "spx-decision-bot.js",
+  "main": "spx-gamma-bot.js",
   "scripts": {
-    "start": "node spx-decision-bot.js"
+    "start": "node spx-gamma-bot.js"
   },
   "dependencies": {
     "@supabase/supabase-js": "^2.45.4",
     "axios": "^1.7.9",
     "dotenv": "^16.4.7",
-    "node-telegram-bot-api": "^0.66.0"
+    "node-telegram-bot-api": "^0.66.0",
+    "puppeteer": "^24.10.2"
   }
 }
