@@ -404,7 +404,7 @@ function selectBestOptionContract(contracts, side) {
   const wantedType = side === 'CALL' ? 'call' : 'put';
   const today = todayDate();
 
-  const candidates = contracts
+  const all = contracts
     .map(c => {
       const type = getContractType(c);
       const strike = getStrike(c);
@@ -442,23 +442,82 @@ function selectBestOptionContract(contracts, side) {
       if (x.type !== wantedType) return false;
       if (!x.ticker || !x.expiration) return false;
       if (x.strike === null || x.price === null || x.price <= 0) return false;
+      return true;
+    });
 
+  console.log('ALL SAME SIDE CONTRACTS =', all.length);
+
+  const candidates = all
+    .filter(x => {
       if (x.volume < MIN_VOLUME) return false;
-      if (x.oi < MIN_OI) return false;
+      if (x.oi < 100) return false;
 
-      if (x.price < MIN_OPTION_PRICE || x.price > MAX_OPTION_PRICE) return false;
-      if (x.delta === null || x.delta < MIN_DELTA || x.delta > MAX_DELTA) return false;
-      if (x.spreadPct === null || x.spreadPct > MAX_SPREAD_PCT) return false;
+      if (x.price < 0.50 || x.price > 10) return false;
+
+      if (x.delta !== null && (x.delta < 0.10 || x.delta > 0.90)) return false;
+
+      if (x.spreadPct !== null && x.spreadPct > 50) return false;
 
       return true;
     })
     .map(x => ({
       ...x,
-      optionScore: scoreOptionCandidate(x)
+      optionScore: scoreOptionCandidate({
+        ...x,
+        spreadPct: x.spreadPct ?? 50,
+        delta: x.delta ?? 0.35
+      })
     }))
     .sort((a, b) => b.optionScore - a.optionScore);
 
-  return candidates[0] || null;
+  console.log('CANDIDATES FOUND =', candidates.length);
+
+  if (candidates.length > 0) {
+    console.log('BEST CONTRACT =', {
+      ticker: candidates[0].ticker,
+      strike: candidates[0].strike,
+      price: candidates[0].price,
+      delta: candidates[0].delta,
+      volume: candidates[0].volume,
+      oi: candidates[0].oi,
+      spread: candidates[0].spreadPct,
+      score: candidates[0].optionScore
+    });
+
+    return candidates[0];
+  }
+
+  if (all.length > 0) {
+    const fallback = all
+      .map(x => ({
+        ...x,
+        optionScore: scoreOptionCandidate({
+          ...x,
+          spreadPct: x.spreadPct ?? 50,
+          delta: x.delta ?? 0.35
+        })
+      }))
+      .sort((a, b) => {
+        const av = Number(a.volume || 0) + Number(a.oi || 0);
+        const bv = Number(b.volume || 0) + Number(b.oi || 0);
+        return bv - av;
+      });
+
+    console.log('FALLBACK CONTRACT =', {
+      ticker: fallback[0]?.ticker,
+      strike: fallback[0]?.strike,
+      price: fallback[0]?.price,
+      delta: fallback[0]?.delta,
+      volume: fallback[0]?.volume,
+      oi: fallback[0]?.oi,
+      spread: fallback[0]?.spreadPct,
+      score: fallback[0]?.optionScore
+    });
+
+    return fallback[0] || null;
+  }
+
+  return null;
 }
 
 async function getTradeByStatuses(statuses) {
