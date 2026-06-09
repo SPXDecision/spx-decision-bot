@@ -37,7 +37,7 @@ const supabase = createClient(SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY);
 
 bot.sendMessage(
   ADMIN_CHAT_ID,
-  '✅ SPX Decision Bot شغال الآن\n\nتم تشغيل البوت بدون سعر SPX — الاعتماد على القاما والسيولة والعقود فقط.'
+  '✅ SPX Decision Bot شغال الآن\n\nتم تشغيل البوت بدون سعر SPX — الاعتماد على أقوى سيولة وقاما فقط.'
 ).catch(err => {
   console.error('START MESSAGE ERROR:', err.message);
 });
@@ -302,6 +302,10 @@ function analyzeSPX(contracts) {
     putWall,
     magnet,
 
+    strongestCall,
+    strongestPut,
+    strongestMagnet,
+
     topCallLiquidity,
     topPutLiquidity
   };
@@ -312,63 +316,68 @@ function buildTradeDecision(a) {
   let score = 0;
   const reasons = [];
 
-  const topCallVol = a.topCallLiquidity?.[0]?.callVolume || 0;
-  const topPutVol = a.topPutLiquidity?.[0]?.putVolume || 0;
+  const topCall = a.topCallLiquidity?.[0] || {};
+  const topPut = a.topPutLiquidity?.[0] || {};
 
-  const topCallOI = a.topCallLiquidity?.[0]?.callOI || 0;
-  const topPutOI = a.topPutLiquidity?.[0]?.putOI || 0;
+  const callLiquidity =
+    Number(topCall.callVolume || 0) +
+    Number(topCall.callOI || 0);
 
-  if (a.callFlowPct >= 55 && topCallVol > topPutVol * 0.8) {
+  const putLiquidity =
+    Number(topPut.putVolume || 0) +
+    Number(topPut.putOI || 0);
+
+  const callGamma = Number(topCall.callGammaPower || 0);
+  const putGamma = Number(topPut.putGammaPower || 0);
+
+  const callPower = callLiquidity + callGamma;
+  const putPower = putLiquidity + putGamma;
+
+  if (callPower > putPower * 1.20) {
     side = 'CALL';
-    score += 35;
-    reasons.push(`سيطرة الكول ${pct(a.callFlowPct)}`);
-    reasons.push('سيولة الكول أقوى من البوت');
+    score += 50;
+    reasons.push('أقوى سيولة وقاما لصالح الكول');
+    reasons.push(`Call Strike الأقوى: ${fmt(topCall.strike, 0)}`);
   }
 
-  if (a.putFlowPct >= 55 && topPutVol > topCallVol * 0.8) {
+  if (putPower > callPower * 1.20) {
     side = 'PUT';
-    score += 35;
-    reasons.push(`سيطرة البوت ${pct(a.putFlowPct)}`);
-    reasons.push('سيولة البوت أقوى من الكول');
+    score += 50;
+    reasons.push('أقوى سيولة وقاما لصالح البوت');
+    reasons.push(`Put Strike الأقوى: ${fmt(topPut.strike, 0)}`);
   }
 
   if (side === 'CALL') {
-    if (a.netGamma > 0) {
-      score += 25;
-      reasons.push('قاما إيجابية تدعم الكول');
-    } else if (a.callFlowPct >= 65) {
+    if (Number(topCall.callVolume || 0) >= MIN_VOLUME * 10) {
+      score += 20;
+      reasons.push('حجم الكول قوي');
+    }
+
+    if (Number(topCall.callOI || 0) >= MIN_OI) {
       score += 15;
-      reasons.push('سيولة الكول قوية رغم القاما السلبية');
-    }
-
-    if (topCallVol >= MIN_VOLUME * 10) {
-      score += 20;
-      reasons.push('حجم الكول مرتفع لحظياً');
-    }
-
-    if (topCallOI >= MIN_OI) {
-      score += 20;
       reasons.push('العقود المفتوحة للكول قوية');
+    }
+
+    if (callGamma > putGamma) {
+      score += 15;
+      reasons.push('قاما الكول أقوى من البوت');
     }
   }
 
   if (side === 'PUT') {
-    if (a.netGamma < 0) {
-      score += 25;
-      reasons.push('قاما سلبية تدعم البوت');
-    } else if (a.putFlowPct >= 65) {
+    if (Number(topPut.putVolume || 0) >= MIN_VOLUME * 10) {
+      score += 20;
+      reasons.push('حجم البوت قوي');
+    }
+
+    if (Number(topPut.putOI || 0) >= MIN_OI) {
       score += 15;
-      reasons.push('سيولة البوت قوية رغم القاما الإيجابية');
-    }
-
-    if (topPutVol >= MIN_VOLUME * 10) {
-      score += 20;
-      reasons.push('حجم البوت مرتفع لحظياً');
-    }
-
-    if (topPutOI >= MIN_OI) {
-      score += 20;
       reasons.push('العقود المفتوحة للبوت قوية');
+    }
+
+    if (putGamma > callGamma) {
+      score += 15;
+      reasons.push('قاما البوت أقوى من الكول');
     }
   }
 
@@ -574,7 +583,7 @@ ${optionData.ticker}
 ⭐ تقييم العقد: ${fmt(optionData.optionScore, 1)} / 110
 
 ━━━━━━━━━━━━━━
-🧠 قراءة القاما والسيولة
+🧠 أقوى سيولة وقاما
 
 Gamma State:
 ${analysis.gammaState}
@@ -601,17 +610,34 @@ Magnet:
 ${fmt(analysis.magnet, 0)}
 
 ━━━━━━━━━━━━━━
-🔥 أقوى سيولة
+🔥 أقوى كول
 
-أقوى كول:
-Strike: ${fmt(topCall?.strike, 0)}
-Volume: ${fmt(topCall?.callVolume, 0)}
-OI: ${fmt(topCall?.callOI, 0)}
+Strike:
+${fmt(topCall?.strike, 0)}
 
-أقوى بوت:
-Strike: ${fmt(topPut?.strike, 0)}
-Volume: ${fmt(topPut?.putVolume, 0)}
-OI: ${fmt(topPut?.putOI, 0)}
+Volume:
+${fmt(topCall?.callVolume, 0)}
+
+OI:
+${fmt(topCall?.callOI, 0)}
+
+Gamma Power:
+${fmt(topCall?.callGammaPower, 0)}
+
+━━━━━━━━━━━━━━
+🔥 أقوى بوت
+
+Strike:
+${fmt(topPut?.strike, 0)}
+
+Volume:
+${fmt(topPut?.putVolume, 0)}
+
+OI:
+${fmt(topPut?.putOI, 0)}
+
+Gamma Power:
+${fmt(topPut?.putGammaPower, 0)}
 
 ━━━━━━━━━━━━━━
 📊 بيانات العقد
@@ -635,7 +661,7 @@ ${signal.reasons.map(x => `✅ ${x}`).join('\n')}
 ⏳ الحالة:
 مراقبة فقط — لم تتفعل بعد
 
-📌 التفعيل الآن يعتمد على استمرار قوة القاما والسيولة والحجم والعقود المفتوحة، وليس على سعر SPX.
+📌 التفعيل يعتمد على استمرار قوة القاما والسيولة والعقود، بدون سعر SPX.
 
 ⚠️ ليست توصية شراء أو بيع`
   );
@@ -667,7 +693,7 @@ TP2: ${fmt(optionEntry + PROFIT_STEP * 2, 2)}
 
 🔔 سيتم إرسال تحديث كلما ارتفع العقد +${fmt(PROFIT_STEP, 2)}
 
-📌 هذه الصفقة مفعلة بناءً على استمرار قوة القاما والسيولة والعقود.
+📌 هذه الصفقة مفعلة بناءً على استمرار أقوى سيولة وقاما.
 
 ⚠️ ليست توصية شراء أو بيع`
   );
@@ -787,7 +813,10 @@ async function manageWatchingTrade(trade, contracts, analysis) {
   }
 
   if (currentPrice < MIN_OPTION_PRICE || currentPrice > MAX_OPTION_PRICE_AT_ACTIVATION) {
-    await bot.sendMessage(ADMIN_CHAT_ID, buildActivationCancelledMessage(trade, currentPrice));
+    await bot.sendMessage(
+      ADMIN_CHAT_ID,
+      buildActivationCancelledMessage(trade, currentPrice)
+    );
 
     await updateTrade(trade.id, {
       status: 'cancelled_price_range',
@@ -831,10 +860,16 @@ async function manageWatchingTrade(trade, contracts, analysis) {
 
 async function manageActiveTrade(trade, contracts) {
   const option = contracts.find(c => getTicker(c) === trade.option_ticker);
-  if (!option) return console.log('Active option not found:', trade.option_ticker);
+
+  if (!option) {
+    return console.log('Active option not found:', trade.option_ticker);
+  }
 
   const currentPrice = getOptionPrice(option);
-  if (currentPrice === null || currentPrice <= 0) return;
+
+  if (currentPrice === null || currentPrice <= 0) {
+    return;
+  }
 
   const optionEntry = Number(trade.option_entry);
   const profitAmount = currentPrice - optionEntry;
@@ -844,8 +879,14 @@ async function manageActiveTrade(trade, contracts) {
   const newLow = Math.min(Number(trade.option_low || optionEntry), currentPrice);
 
   const maxOptionPrice = Math.max(Number(trade.max_option_price || optionEntry), newHigh);
-  const maxProfitAmount = Math.max(Number(trade.max_profit_amount || 0), maxOptionPrice - optionEntry);
-  const maxProfitPct = optionEntry > 0 ? (maxProfitAmount / optionEntry) * 100 : 0;
+  const maxProfitAmount = Math.max(
+    Number(trade.max_profit_amount || 0),
+    maxOptionPrice - optionEntry
+  );
+
+  const maxProfitPct = optionEntry > 0
+    ? (maxProfitAmount / optionEntry) * 100
+    : 0;
 
   const currentStep =
     profitAmount > 0
@@ -909,7 +950,10 @@ async function manageActiveTrade(trade, contracts) {
 }
 
 async function runCycle() {
-  if (isRunning) return console.log('Previous cycle still running, skipped.');
+  if (isRunning) {
+    return console.log('Previous cycle still running, skipped.');
+  }
+
   isRunning = true;
 
   try {
@@ -921,10 +965,10 @@ async function runCycle() {
 
     console.log('Analysis:', analysis);
     console.log('CALL FLOW =', analysis.callFlowPct);
-console.log('PUT FLOW =', analysis.putFlowPct);
-console.log('NET GAMMA =', analysis.netGamma);
-console.log('TOP CALL =', analysis.topCallLiquidity?.[0]);
-console.log('TOP PUT =', analysis.topPutLiquidity?.[0]);
+    console.log('PUT FLOW =', analysis.putFlowPct);
+    console.log('NET GAMMA =', analysis.netGamma);
+    console.log('TOP CALL =', analysis.topCallLiquidity?.[0]);
+    console.log('TOP PUT =', analysis.topPutLiquidity?.[0]);
 
     const existingTrade = await getTradeByStatuses(['watching', 'active']);
 
@@ -946,7 +990,9 @@ console.log('TOP PUT =', analysis.topPutLiquidity?.[0]);
       return console.log(signal.reason);
     }
 
-    const signalKey = `${signal.side}-${analysis.callWall}-${analysis.putWall}-${analysis.magnet}-${todayDate()}`;
+    const signalKey =
+      `${signal.side}-${analysis.callWall}-${analysis.putWall}-${analysis.magnet}-${todayDate()}`;
+
     const now = Date.now();
 
     if (signalKey === lastSignalKey && now - lastSignalAt < SIGNAL_COOLDOWN_MS) {
