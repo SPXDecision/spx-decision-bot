@@ -14,7 +14,7 @@ const SUPABASE_SERVICE_ROLE_KEY = process.env.SUPABASE_SERVICE_ROLE_KEY;
 const CHECK_INTERVAL_MS = Number(process.env.CHECK_INTERVAL_MS || 30000);
 
 const MIN_VOLUME = Number(process.env.MIN_VOLUME || 100);
-const MIN_OI = Number(process.env.MIN_OI || 500);
+const MIN_OI = Number(process.env.MIN_OI || 100);
 
 const MIN_WATCH_SCORE = Number(process.env.MIN_WATCH_SCORE || 60);
 const MIN_ACTIVATION_SCORE = Number(process.env.MIN_ACTIVATION_SCORE || 80);
@@ -24,13 +24,13 @@ const OPTION_STOP_PCT = Number(process.env.OPTION_STOP_PCT || 25);
 const SIGNAL_COOLDOWN_MS = Number(process.env.SIGNAL_COOLDOWN_MS || 5 * 60 * 1000);
 const MAX_PAGES = Number(process.env.MAX_PAGES || 20);
 
-const MIN_OPTION_PRICE = Number(process.env.MIN_OPTION_PRICE || 1.50);
+const MIN_OPTION_PRICE = Number(process.env.MIN_OPTION_PRICE || 2.00);
 const MAX_OPTION_PRICE = Number(process.env.MAX_OPTION_PRICE || 3.20);
-const MAX_OPTION_PRICE_AT_ACTIVATION = Number(process.env.MAX_OPTION_PRICE_AT_ACTIVATION || 3.50);
+const MAX_OPTION_PRICE_AT_ACTIVATION = Number(process.env.MAX_OPTION_PRICE_AT_ACTIVATION || 3.20);
 
-const MIN_DELTA = Number(process.env.MIN_DELTA || 0.25);
-const MAX_DELTA = Number(process.env.MAX_DELTA || 0.50);
-const MAX_SPREAD_PCT = Number(process.env.MAX_SPREAD_PCT || 15);
+const MIN_DELTA = Number(process.env.MIN_DELTA || 0.10);
+const MAX_DELTA = Number(process.env.MAX_DELTA || 0.90);
+const MAX_SPREAD_PCT = Number(process.env.MAX_SPREAD_PCT || 50);
 
 const bot = new TelegramBot(BOT_TOKEN, { polling: false });
 const supabase = createClient(SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY);
@@ -450,13 +450,13 @@ function selectBestOptionContract(contracts, side) {
   const candidates = all
     .filter(x => {
       if (x.volume < MIN_VOLUME) return false;
-      if (x.oi < 100) return false;
+      if (x.oi < MIN_OI) return false;
 
-      if (x.price < 0.50 || x.price > 10) return false;
+      if (x.price < MIN_OPTION_PRICE || x.price > MAX_OPTION_PRICE) return false;
 
-      if (x.delta !== null && (x.delta < 0.10 || x.delta > 0.90)) return false;
+      if (x.delta !== null && (x.delta < MIN_DELTA || x.delta > MAX_DELTA)) return false;
 
-      if (x.spreadPct !== null && x.spreadPct > 50) return false;
+      if (x.spreadPct !== null && x.spreadPct > MAX_SPREAD_PCT) return false;
 
       return true;
     })
@@ -464,7 +464,7 @@ function selectBestOptionContract(contracts, side) {
       ...x,
       optionScore: scoreOptionCandidate({
         ...x,
-        spreadPct: x.spreadPct ?? 50,
+        spreadPct: x.spreadPct ?? MAX_SPREAD_PCT,
         delta: x.delta ?? 0.35
       })
     }))
@@ -487,35 +487,12 @@ function selectBestOptionContract(contracts, side) {
     return candidates[0];
   }
 
-  if (all.length > 0) {
-    const fallback = all
-      .map(x => ({
-        ...x,
-        optionScore: scoreOptionCandidate({
-          ...x,
-          spreadPct: x.spreadPct ?? 50,
-          delta: x.delta ?? 0.35
-        })
-      }))
-      .sort((a, b) => {
-        const av = Number(a.volume || 0) + Number(a.oi || 0);
-        const bv = Number(b.volume || 0) + Number(b.oi || 0);
-        return bv - av;
-      });
-
-    console.log('FALLBACK CONTRACT =', {
-      ticker: fallback[0]?.ticker,
-      strike: fallback[0]?.strike,
-      price: fallback[0]?.price,
-      delta: fallback[0]?.delta,
-      volume: fallback[0]?.volume,
-      oi: fallback[0]?.oi,
-      spread: fallback[0]?.spreadPct,
-      score: fallback[0]?.optionScore
-    });
-
-    return fallback[0] || null;
-  }
+  console.log('NO CONTRACT IN PRICE RANGE', {
+    minPrice: MIN_OPTION_PRICE,
+    maxPrice: MAX_OPTION_PRICE,
+    side: wantedType,
+    totalSameSide: all.length
+  });
 
   return null;
 }
@@ -699,6 +676,7 @@ ${signal.reasons.map(x => `✅ ${x}`).join('\n')}
 مراقبة فقط — لم تتفعل بعد
 
 📌 التفعيل يعتمد على استمرار قوة القاما والسيولة والعقود، بدون سعر SPX.
+📌 العقد المختار ليس شرطاً أن يكون نفس سترايك القاما؛ المهم نفس الاتجاه وسعره بين 2.00 و 3.20.
 
 ⚠️ ليست توصية شراء أو بيع`
   );
