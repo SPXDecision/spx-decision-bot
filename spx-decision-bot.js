@@ -466,21 +466,82 @@ function getActivationLevel(side, analysis) {
   return side === 'CALL' ? analysis.decisionHigh : analysis.decisionLow;
 }
 
-function getSPXTargets(side, activationPrice) {
+function uniqueSortedLevels(levels, side, activationPrice) {
+  const clean = [...new Set(
+    levels
+      .filter(v => Number.isFinite(Number(v)))
+      .map(Number)
+  )];
+
   if (side === 'CALL') {
+    return clean
+      .filter(v => v > activationPrice)
+      .sort((a, b) => a - b);
+  }
+
+  return clean
+    .filter(v => v < activationPrice)
+    .sort((a, b) => b - a);
+}
+
+function getSPXTargets(side, activationPrice, analysis) {
+  const callLiquidityLevels = (analysis.topCallLiquidity || []).map(x => x.strike);
+  const putLiquidityLevels = (analysis.topPutLiquidity || []).map(x => x.strike);
+
+  if (side === 'CALL') {
+    const targets = uniqueSortedLevels(
+      [
+        analysis.magnet,
+        analysis.callWall,
+        analysis.decisionHigh,
+        ...callLiquidityLevels
+      ],
+      side,
+      activationPrice
+    );
+
+    const stops = [
+      analysis.decisionLow,
+      analysis.putWall,
+      analysis.magnet
+    ]
+      .filter(v => Number.isFinite(Number(v)) && Number(v) < activationPrice)
+      .map(Number)
+      .sort((a, b) => b - a);
+
     return {
-      tp1: activationPrice + 10,
-      tp2: activationPrice + 20,
-      tp3: activationPrice + 30,
-      stop: activationPrice - 10
+      tp1: targets[0] || activationPrice + 10,
+      tp2: targets[1] || targets[0] || activationPrice + 20,
+      tp3: targets[2] || targets[1] || targets[0] || activationPrice + 30,
+      stop: stops[0] || activationPrice - 10
     };
   }
 
+  const targets = uniqueSortedLevels(
+    [
+      analysis.magnet,
+      analysis.putWall,
+      analysis.decisionLow,
+      ...putLiquidityLevels
+    ],
+    side,
+    activationPrice
+  );
+
+  const stops = [
+    analysis.decisionHigh,
+    analysis.callWall,
+    analysis.magnet
+  ]
+    .filter(v => Number.isFinite(Number(v)) && Number(v) > activationPrice)
+    .map(Number)
+    .sort((a, b) => a - b);
+
   return {
-    tp1: activationPrice - 10,
-    tp2: activationPrice - 20,
-    tp3: activationPrice - 30,
-    stop: activationPrice + 10
+    tp1: targets[0] || activationPrice - 10,
+    tp2: targets[1] || targets[0] || activationPrice - 20,
+    tp3: targets[2] || targets[1] || targets[0] || activationPrice - 30,
+    stop: stops[0] || activationPrice + 10
   };
 }
 
@@ -513,7 +574,7 @@ async function updateTrade(id, patch) {
 
 async function saveWatchingTrade(signal, optionData, spxPrice, analysis) {
   const activationPrice = getActivationLevel(signal.side, analysis);
-  const targets = getSPXTargets(signal.side, activationPrice);
+  const targets = getSPXTargets(signal.side, activationPrice, analysis);
 
   const row = {
     status: 'watching',
@@ -567,7 +628,7 @@ async function saveWatchingTrade(signal, optionData, spxPrice, analysis) {
 function buildWatchingMessage(signal, spxPrice, optionData, analysis) {
   const isCall = signal.side === 'CALL';
   const activationPrice = getActivationLevel(signal.side, analysis);
-  const targets = getSPXTargets(signal.side, activationPrice);
+  const targets = getSPXTargets(signal.side, activationPrice, analysis);
 
   return (
 `🚨 صفقة مراقبة — SPX Decision
