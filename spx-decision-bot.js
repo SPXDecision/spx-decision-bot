@@ -14,18 +14,23 @@ const SUPABASE_SERVICE_ROLE_KEY = process.env.SUPABASE_SERVICE_ROLE_KEY;
 
 const CHECK_INTERVAL_MS = Number(process.env.CHECK_INTERVAL_MS || 30000);
 const MIN_VOLUME = Number(process.env.MIN_VOLUME || 100);
-const MIN_SCORE = Number(process.env.MIN_SCORE || 80);
+const MIN_WATCH_SCORE = Number(process.env.MIN_WATCH_SCORE || 60);
+const MIN_ACTIVATION_SCORE = Number(process.env.MIN_ACTIVATION_SCORE || 80);
+
 const PROFIT_STEP = Number(process.env.PROFIT_STEP || 0.30);
 const OPTION_STOP_PCT = Number(process.env.OPTION_STOP_PCT || 25);
 const SIGNAL_COOLDOWN_MS = Number(process.env.SIGNAL_COOLDOWN_MS || 5 * 60 * 1000);
 const MAX_PAGES = Number(process.env.MAX_PAGES || 20);
 
-const bot = new TelegramBot(BOT_TOKEN, { polling: false });
+const MIN_OPTION_PRICE = Number(process.env.MIN_OPTION_PRICE || 1.50);
+const MAX_OPTION_PRICE = Number(process.env.MAX_OPTION_PRICE || 3.00);
+const MIN_DELTA = Number(process.env.MIN_DELTA || 0.20);
+const MAX_DELTA = Number(process.env.MAX_DELTA || 0.45);
+const MAX_SPREAD_PCT = Number(process.env.MAX_SPREAD_PCT || 20);
+const MAX_STRIKE_DISTANCE = Number(process.env.MAX_STRIKE_DISTANCE || 25);
 
-const supabase = createClient(
-  SUPABASE_URL,
-  SUPABASE_SERVICE_ROLE_KEY
-);
+const bot = new TelegramBot(BOT_TOKEN, { polling: false });
+const supabase = createClient(SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY);
 
 let lastSignalKey = '';
 let lastSignalAt = 0;
@@ -50,30 +55,18 @@ function pct(n) {
   return `${Number(n).toFixed(1)}%`;
 }
 
-function getDateRange() {
-  const today = new Date();
-  const end = new Date();
-  end.setDate(today.getDate() + 7);
-
-  return {
-    fromDate: today.toISOString().slice(0, 10),
-    toDate: end.toISOString().slice(0, 10)
-  };
+function todayDate() {
+  return new Date().toISOString().slice(0, 10);
 }
 
 async function getSPXPrice() {
   const url =
     `https://financialmodelingprep.com/stable/quote?symbol=%5EGSPC&apikey=${FMP_API_KEY}`;
 
-  const res = await axios.get(url, {
-    timeout: 30000
-  });
-
+  const res = await axios.get(url, { timeout: 30000 });
   const row = res.data?.[0];
 
-  const price =
-    Number(row?.price) ||
-    Number(row?.previousClose);
+  const price = Number(row?.price) || Number(row?.previousClose);
 
   if (!price) {
     throw new Error('FMP SPX price unavailable');
@@ -100,6 +93,11 @@ function getTicker(c) {
 
 function getGamma(c) {
   return toNumber(c?.greeks?.gamma);
+}
+
+function getDelta(c) {
+  const d = toNumber(c?.greeks?.delta);
+  return d === null ? null : Math.abs(d);
 }
 
 function getOpenInterest(c) {
@@ -137,6 +135,7 @@ function getOptionPrice(c) {
 
   return null;
 }
+
 function getSpreadPct(c) {
   const bid = getBid(c);
   const ask = getAsk(c);
@@ -146,26 +145,30 @@ function getSpreadPct(c) {
   const mid = (bid + ask) / 2;
   return mid > 0 ? ((ask - bid) / mid) * 100 : null;
 }
+function buildContractLabel(optionData) {
+  const sideLetter = optionData.type === 'call' ? 'C' : 'P';
+  return `SPX ${fmt(optionData.strike, 0)}${sideLetter}`;
+}
 
 async function getSPXOptionsChain() {
-  const { fromDate, toDate } = getDateRange();
+  const today = todayDate();
 
   let url =
     `https://api.massive.com/v3/snapshot/options/I:SPX` +
     `?order=asc&limit=250&sort=ticker` +
-    `&expiration_date.gte=${fromDate}` +
-    `&expiration_date.lte=${toDate}` +
+    `&expiration_date=${today}` +
     `&apiKey=${MASSIVE_API_KEY}`;
 
   const allContracts = [];
   let page = 1;
 
   while (url && page <= MAX_PAGES) {
-    console.log(`Fetching SPX page ${page}...`);
+    console.log(`Fetching SPX 0DTE page ${page}...`);
 
     const res = await axios.get(url, { timeout: 90000 });
     const results = res.data?.results || [];
 
+    console.log(`Page ${page}: ${results.length} contracts`);
     allContracts.push(...results);
 
     url = res.data?.next_url || null;
@@ -178,20 +181,23 @@ async function getSPXOptionsChain() {
     await sleep(150);
   }
 
-  console.log(`Total contracts loaded: ${allContracts.length}`);
-
+  console.log(`Total 0DTE contracts loaded: ${allContracts.length}`);
   return allContracts;
 }
 
 function analyzeSPX(contracts) {
+  const today = todayDate();
+
   const usable = contracts.filter(c => {
     const type = getContractType(c);
     const strike = getStrike(c);
     const gamma = getGamma(c);
     const oi = getOpenInterest(c);
     const volume = getVolume(c);
+    const expiration = getExpiration(c);
 
     return (
+      expiration === today &&
       (type === 'call' || type === 'put') &&
       strike !== null &&
       gamma !== null &&
@@ -229,7 +235,6 @@ function analyzeSPX(contracts) {
     }
 
     const row = strikeMap.get(strike);
-
     row.totalGammaPower += gammaPower;
 
     if (type === 'call') {
@@ -293,7 +298,8 @@ function analyzeSPX(contracts) {
     decisionHigh = Math.max(callWall, putWall);
     isTightZone = true;
   }
-    return {
+
+  return {
     usableCount: usable.length,
     strikeCount: rows.length,
     netGamma,
@@ -313,7 +319,6 @@ function analyzeSPX(contracts) {
     topPutLiquidity
   };
 }
-
 function buildTradeDecision(spxPrice, a) {
   if (!spxPrice || !a.decisionLow || !a.decisionHigh) {
     return { side: 'NO_TRADE', score: 0, reason: 'بيانات غير مكتملة' };
@@ -323,10 +328,10 @@ function buildTradeDecision(spxPrice, a) {
   let score = 0;
   const reasons = [];
 
-  if (spxPrice < a.decisionLow) {
+  if (spxPrice <= a.decisionLow + 5) {
     side = 'PUT';
     score += 30;
-    reasons.push(`السعر كسر أدنى منطقة القرار ${fmt(a.decisionLow, 2)}`);
+    reasons.push(`السعر قريب من كسر منطقة القرار ${fmt(a.decisionLow, 2)}`);
 
     if (a.putFlowPct >= 55) {
       score += 25;
@@ -344,10 +349,10 @@ function buildTradeDecision(spxPrice, a) {
     }
   }
 
-  if (spxPrice > a.decisionHigh) {
+  if (spxPrice >= a.decisionHigh - 5) {
     side = 'CALL';
     score += 30;
-    reasons.push(`السعر اخترق أعلى منطقة القرار ${fmt(a.decisionHigh, 2)}`);
+    reasons.push(`السعر قريب من اختراق منطقة القرار ${fmt(a.decisionHigh, 2)}`);
 
     if (a.callFlowPct >= 55) {
       score += 25;
@@ -368,15 +373,7 @@ function buildTradeDecision(spxPrice, a) {
     }
   }
 
-  if (spxPrice >= a.decisionLow && spxPrice <= a.decisionHigh) {
-    return {
-      side: 'NO_TRADE',
-      score: 0,
-      reason: 'السعر داخل منطقة التوازن، لا توجد صفقة'
-    };
-  }
-
-  if (score < MIN_SCORE) {
+  if (score < MIN_WATCH_SCORE) {
     return {
       side: 'NO_TRADE',
       score,
@@ -393,6 +390,7 @@ function buildTradeDecision(spxPrice, a) {
 
 function selectBestOptionContract(contracts, side, spxPrice) {
   const wantedType = side === 'CALL' ? 'call' : 'put';
+  const today = todayDate();
 
   const candidates = contracts
     .map(c => {
@@ -404,6 +402,11 @@ function selectBestOptionContract(contracts, side, spxPrice) {
       const spreadPct = getSpreadPct(c);
       const ticker = getTicker(c);
       const expiration = getExpiration(c);
+      const delta = getDelta(c);
+      const gamma = getGamma(c);
+      const bid = getBid(c);
+      const ask = getAsk(c);
+      const last = getLastTrade(c);
 
       return {
         contract: c,
@@ -414,94 +417,89 @@ function selectBestOptionContract(contracts, side, spxPrice) {
         price,
         spreadPct,
         ticker,
-        expiration
+        expiration,
+        delta,
+        gamma,
+        bid,
+        ask,
+        last
       };
     })
     .filter(x => {
+      if (x.expiration !== today) return false;
       if (x.type !== wantedType) return false;
       if (!x.ticker || !x.expiration) return false;
       if (x.strike === null || x.price === null || x.price <= 0) return false;
       if (x.volume < MIN_VOLUME) return false;
-      if (x.spreadPct !== null && x.spreadPct > 35) return false;
+
+      if (x.price < MIN_OPTION_PRICE || x.price > MAX_OPTION_PRICE) return false;
+      if (x.delta === null || x.delta < MIN_DELTA || x.delta > MAX_DELTA) return false;
+      if (x.spreadPct === null || x.spreadPct > MAX_SPREAD_PCT) return false;
 
       const distance = Math.abs(x.strike - spxPrice);
-      return distance <= 100;
+      return distance <= MAX_STRIKE_DISTANCE;
     })
     .sort((a, b) => {
-      const expA = String(a.expiration);
-      const expB = String(b.expiration);
+      const spreadA = a.spreadPct ?? 999;
+      const spreadB = b.spreadPct ?? 999;
+      if (spreadA !== spreadB) return spreadA - spreadB;
 
-      if (expA !== expB) return expA.localeCompare(expB);
+      const deltaA = Math.abs((a.delta || 0) - 0.30);
+      const deltaB = Math.abs((b.delta || 0) - 0.30);
+      if (deltaA !== deltaB) return deltaA - deltaB;
+
+      if (b.volume !== a.volume) return b.volume - a.volume;
 
       const distA = Math.abs(a.strike - spxPrice);
       const distB = Math.abs(b.strike - spxPrice);
-
-      if (distA !== distB) return distA - distB;
-
-      return b.volume - a.volume;
+      return distA - distB;
     });
 
   return candidates[0] || null;
 }
 
-async function getActiveTrade() {
+function getActivationLevel(side, analysis) {
+  if (analysis.isTightZone) {
+    return side === 'CALL' ? analysis.decisionHigh : analysis.decisionLow;
+  }
+
+  return side === 'CALL' ? analysis.decisionHigh : analysis.decisionLow;
+}
+
+function getSPXTargets(side, activationPrice) {
+  if (side === 'CALL') {
+    return {
+      tp1: activationPrice + 10,
+      tp2: activationPrice + 20,
+      tp3: activationPrice + 30,
+      stop: activationPrice - 10
+    };
+  }
+
+  return {
+    tp1: activationPrice - 10,
+    tp2: activationPrice - 20,
+    tp3: activationPrice - 30,
+    stop: activationPrice + 10
+  };
+}
+
+async function getTradeByStatuses(statuses) {
   const { data, error } = await supabase
     .from('spx_decision_trades')
     .select('*')
-    .eq('status', 'active')
+    .in('status', statuses)
     .order('created_at', { ascending: false })
     .limit(1)
     .maybeSingle();
 
   if (error) {
-    console.error('getActiveTrade error:', error.message);
+    console.error('getTradeByStatuses error:', error.message);
     return null;
   }
 
   return data || null;
 }
-
-async function saveNewTrade(signal, optionData, spxPrice) {
-  const optionEntry = optionData.price;
-  const stopPrice = optionEntry * (1 - OPTION_STOP_PCT / 100);
-
-  const row = {
-    status: 'active',
-    side: signal.side,
-
-    spx_entry: spxPrice,
-    spx_current: spxPrice,
-
-    option_ticker: optionData.ticker,
-    option_entry: optionEntry,
-    option_current: optionEntry,
-    option_high: optionEntry,
-    option_low: optionEntry,
-
-    stop_price: stopPrice,
-    tp1: optionEntry + PROFIT_STEP,
-    tp2: optionEntry + PROFIT_STEP * 2,
-
-    max_profit_amount: 0,
-    max_profit_pct: 0,
-    last_profit_step: 0,
-
-    close_reason: null
-  };
-    const { data, error } = await supabase
-    .from('spx_decision_trades')
-    .insert(row)
-    .select()
-    .single();
-
-  if (error) {
-    console.error('saveNewTrade error:', error.message);
-    throw error;
-  }
-
-  return data;
-}
-
 async function updateTrade(id, patch) {
   const { error } = await supabase
     .from('spx_decision_trades')
@@ -513,133 +511,288 @@ async function updateTrade(id, patch) {
   }
 }
 
-function buildTradeMessage(signal, spxPrice, analysis, optionData) {
+async function saveWatchingTrade(signal, optionData, spxPrice, analysis) {
+  const activationPrice = getActivationLevel(signal.side, analysis);
+  const targets = getSPXTargets(signal.side, activationPrice);
+
+  const row = {
+    status: 'watching',
+    side: signal.side,
+
+    spx_entry: null,
+    spx_current: spxPrice,
+
+    activation_price: activationPrice,
+    watch_option_price: optionData.price,
+    contract_label: buildContractLabel(optionData),
+    expiration_date: optionData.expiration,
+
+    option_ticker: optionData.ticker,
+    option_entry: null,
+    option_current: optionData.price,
+    option_high: optionData.price,
+    option_low: optionData.price,
+    max_option_price: optionData.price,
+
+    stop_price: null,
+    tp1: null,
+    tp2: null,
+
+    spx_tp1: targets.tp1,
+    spx_tp2: targets.tp2,
+    spx_tp3: targets.tp3,
+    spx_stop: targets.stop,
+
+    max_profit_amount: 0,
+    max_profit_pct: 0,
+    last_profit_step: 0,
+    activation_reason: signal.reasons.join(' | '),
+    close_reason: null
+  };
+
+  const { data, error } = await supabase
+    .from('spx_decision_trades')
+    .insert(row)
+    .select()
+    .single();
+
+  if (error) {
+    console.error('saveWatchingTrade error:', error.message);
+    throw error;
+  }
+
+  return data;
+}
+
+function buildWatchingMessage(signal, spxPrice, optionData, analysis) {
   const isCall = signal.side === 'CALL';
-  const stopPrice = optionData.price * (1 - OPTION_STOP_PCT / 100);
+  const activationPrice = getActivationLevel(signal.side, analysis);
+  const targets = getSPXTargets(signal.side, activationPrice);
 
   return (
-`🚨 SPX Trade Setup
+`🚨 صفقة مراقبة — SPX Decision
 
-${isCall ? '📈 CALL' : '📉 PUT'}
+📊 المؤشر: SPX
+${isCall ? '🟢 النوع: كول' : '🔴 النوع: بوت'}
+📅 الانتهاء: ${optionData.expiration}
 
-💰 سعر SPX:
-${fmt(spxPrice, 2)}
-
-📄 العقد:
+🎯 العقد المختار:
+${buildContractLabel(optionData)}
 ${optionData.ticker}
 
-💵 دخول العقد:
-${fmt(optionData.price, 2)}
+💰 سعر SPX الحالي: ${fmt(spxPrice, 2)}
 
-🛑 وقف العقد:
-${fmt(stopPrice, 2)}
+💵 سعر العقد وقت الاختيار: ${fmt(optionData.price, 2)}
 
-🔥 الثقة:
-${signal.score}/100
+📍 التفعيل:
+${isCall ? 'اختراق' : 'كسر'} ${fmt(activationPrice, 2)} والثبات ${isCall ? 'فوقه' : 'تحته'}
 
-━━━━━━━━━━━━━━
+🎯 أهداف SPX:
+TP1: ${fmt(targets.tp1, 2)}
+TP2: ${fmt(targets.tp2, 2)}
+TP3: ${fmt(targets.tp3, 2)}
 
-🎯 منطقة القرار:
-${fmt(analysis.decisionLow, 2)} - ${fmt(analysis.decisionHigh, 2)}
-
-🧲 Magnet:
-${fmt(analysis.magnet, 2)}
-
-🟢 Call Wall:
-${fmt(analysis.callWall, 2)}
-
-🔴 Put Wall:
-${fmt(analysis.putWall, 2)}
+🛑 وقف SPX:
+${fmt(targets.stop, 2)}
 
 ━━━━━━━━━━━━━━
+📊 بيانات العقد
 
-💰 السيولة:
-🟢 Call Flow: ${pct(analysis.callFlowPct)}
-🔴 Put Flow: ${pct(analysis.putFlowPct)}
-
-📊 صافي القاما:
-${fmt(analysis.netGamma, 2)}
-
-━━━━━━━━━━━━━━
-
-📍 أسباب الصفقة:
-${signal.reasons.map(x => `• ${x}`).join('\n')}
+Bid: ${fmt(optionData.bid, 2)}
+Ask: ${fmt(optionData.ask, 2)}
+Last: ${fmt(optionData.last, 2)}
+OI: ${fmt(optionData.oi, 0)}
+Volume: ${fmt(optionData.volume, 0)}
+Delta: ${fmt(optionData.delta, 4)}
+Gamma: ${fmt(optionData.gamma, 6)}
 
 ━━━━━━━━━━━━━━
+📊 سبب الصفقة
 
-🎯 تحديثات الربح:
-كل +${fmt(PROFIT_STEP, 2)} على العقد
+${signal.reasons.map(x => `✅ ${x}`).join('\n')}
+✅ Score: ${signal.score} / 100
+✅ انتهاء يومي فقط: ${optionData.expiration}
 
-⚠️ ليست توصية شراء أو بيع.
-راقب التنفيذ وإدارة المخاطر.`
+⏳ الحالة:
+مراقبة فقط — لم تتفعل بعد
+
+⚠️ ليست توصية شراء أو بيع`
   );
 }
 
-function buildProfitUpdateMessage(trade, currentPrice, profitAmount, profitPct) {
+function buildActivatedMessage(trade, spxPrice, optionData, optionEntry) {
+  const isCall = trade.side === 'CALL';
+
   return (
-`📈 تحديث صفقة SPX ${trade.side}
+`✅ تم تفعيل الصفقة — SPX Decision
 
-📄 العقد:
+📊 المؤشر: SPX
+${isCall ? '🟢 النوع: كول' : '🔴 النوع: بوت'}
+📅 الانتهاء: ${trade.expiration_date}
+
+🎯 العقد:
+${trade.contract_label}
 ${trade.option_ticker}
 
-💵 الدخول:
-${fmt(trade.option_entry, 2)}
+💰 سعر SPX الحالي: ${fmt(spxPrice, 2)}
+📍 مستوى الدخول: ${fmt(trade.activation_price, 2)}
 
-💰 السعر الحالي:
-${fmt(currentPrice, 2)}
+💵 دخول العقد: ${fmt(optionEntry, 2)}
+🛑 وقف العقد: ${fmt(optionEntry * (1 - OPTION_STOP_PCT / 100), 2)}
+🛑 وقف SPX: ${fmt(trade.spx_stop, 2)}
 
-✅ الربح الحالي:
-+${fmt(profitAmount, 2)}
+🎯 أهداف SPX:
+TP1: ${fmt(trade.spx_tp1, 2)}
+TP2: ${fmt(trade.spx_tp2, 2)}
+TP3: ${fmt(trade.spx_tp3, 2)}
 
-📊 نسبة الربح:
-+${fmt(profitPct, 1)}%`
+📦 OI: ${fmt(optionData.oi, 0)}
+📊 Volume: ${fmt(optionData.volume, 0)}
+
+🔔 سيتم إرسال تحديث كلما ارتفع العقد +${fmt(PROFIT_STEP, 2)}
+
+⚠️ ليست توصية شراء أو بيع`
   );
 }
 
-function buildStopMessage(trade, currentPrice, maxProfitAmount, maxProfitPct) {
-  const hadProfit = maxProfitAmount > 0;
+function buildProfitUpdateMessage(trade, currentPrice, maxOptionPrice, profitAmount, maxProfitAmount, profitPct) {
+  const isCall = trade.side === 'CALL';
 
-  if (hadProfit) {
-    return (
-`🛑 تم ضرب وقف صفقة SPX ${trade.side}
+  const tp1Hit = isCall
+    ? Number(trade.spx_current) >= Number(trade.spx_tp1)
+    : Number(trade.spx_current) <= Number(trade.spx_tp1);
 
-📄 العقد:
+  const tp2Hit = isCall
+    ? Number(trade.spx_current) >= Number(trade.spx_tp2)
+    : Number(trade.spx_current) <= Number(trade.spx_tp2);
+
+  const tp3Hit = isCall
+    ? Number(trade.spx_current) >= Number(trade.spx_tp3)
+    : Number(trade.spx_current) <= Number(trade.spx_tp3);
+
+  return (
+`📈 تحديث العقد — SPX Decision
+
+📊 المؤشر: SPX
+🎯 العقد:
+${trade.contract_label}
 ${trade.option_ticker}
 
-💵 الدخول:
-${fmt(trade.option_entry, 2)}
+💵 دخول العقد: ${fmt(trade.option_entry, 2)}
+💵 السعر الحالي: ${fmt(currentPrice, 2)}
+📈 أعلى سعر وصله العقد: ${fmt(maxOptionPrice, 2)}
+✅ الربح الحالي: +${fmt(profitAmount, 2)}
+🔥 أعلى ربح وصل له العقد: +${fmt(maxProfitAmount, 2)}
 
-🛑 الوقف:
-${fmt(trade.stop_price, 2)}
+🎯 حالة الأهداف:
+TP1: ${tp1Hit ? '✅ تحقق' : '⏳ لم يتحقق'}
+TP2: ${tp2Hit ? '✅ تحقق' : '⏳ لم يتحقق'}
+TP3: ${tp3Hit ? '✅ تحقق' : '⏳ لم يتحقق'}
 
-💰 السعر الحالي:
-${fmt(currentPrice, 2)}
+🛑 وقف العقد: ${fmt(trade.stop_price, 2)}
 
-📌 ملاحظة:
-الصفقة حققت قبل الوقف أعلى ربح:
-+${fmt(maxProfitAmount, 2)}
+⚠️ ليست توصية شراء أو بيع`
+  );
+}
+function buildStopMessage(trade, currentPrice, maxProfitAmount, maxProfitPct, maxOptionPrice) {
+  if (maxProfitAmount > 0) {
+    return (
+`🟡 تنبيه للمستمرين — SPX Decision
 
-📊 أعلى نسبة ربح:
-+${fmt(maxProfitPct, 1)}%`
+📊 المؤشر: SPX
+🎯 العقد:
+${trade.contract_label}
+${trade.option_ticker}
+
+💵 دخول العقد: ${fmt(trade.option_entry, 2)}
+📈 أعلى سعر وصل له العقد: ${fmt(maxOptionPrice, 2)}
+🔥 أعلى ربح تحقق: +${fmt(maxProfitAmount, 2)}
+📊 أعلى نسبة ربح: +${fmt(maxProfitPct, 1)}%
+
+💵 سعر العقد الحالي: ${fmt(currentPrice, 2)}
+🛑 وقف العقد: ${fmt(trade.stop_price, 2)}
+
+📌 العقد عاد الآن تحت الوقف وتم إيقاف المتابعة.
+✅ الصفقة حققت ربح قبل الرجوع، وليست صفقة فاشلة.
+
+⚠️ ليست توصية شراء أو بيع`
     );
   }
 
   return (
-`🛑 تم ضرب وقف صفقة SPX ${trade.side}
+`🛑 تم ضرب وقف صفقة SPX — SPX Decision
 
-📄 العقد:
+📊 المؤشر: SPX
+🎯 العقد:
+${trade.contract_label}
 ${trade.option_ticker}
 
-💵 الدخول:
-${fmt(trade.option_entry, 2)}
+💵 دخول العقد: ${fmt(trade.option_entry, 2)}
+💵 سعر العقد الحالي: ${fmt(currentPrice, 2)}
+🛑 وقف العقد: ${fmt(trade.stop_price, 2)}
 
-🛑 الوقف:
-${fmt(trade.stop_price, 2)}
+📌 لم تحقق الصفقة ربحاً قبل الوقف.
 
-💰 السعر الحالي:
-${fmt(currentPrice, 2)}
+⚠️ ليست توصية شراء أو بيع`
+  );
+}
 
-📌 لم تحقق الصفقة ربحاً قبل الوقف.`
+async function manageWatchingTrade(trade, contracts, spxPrice) {
+  const isCall = trade.side === 'CALL';
+  const activationPrice = Number(trade.activation_price);
+
+  const activated = isCall
+    ? spxPrice >= activationPrice
+    : spxPrice <= activationPrice;
+
+  if (!activated) {
+    console.log(`Watching trade not activated yet: ${trade.option_ticker}`);
+    await updateTrade(trade.id, { spx_current: spxPrice });
+    return;
+  }
+
+  const option = contracts.find(c => getTicker(c) === trade.option_ticker);
+
+  if (!option) {
+    console.log('Watching option not found:', trade.option_ticker);
+    return;
+  }
+
+  const currentPrice = getOptionPrice(option);
+
+  if (currentPrice === null || currentPrice <= 0) {
+    console.log('No activation option price for:', trade.option_ticker);
+    return;
+  }
+
+  const stopPrice = currentPrice * (1 - OPTION_STOP_PCT / 100);
+
+  await updateTrade(trade.id, {
+    status: 'active',
+    activated_at: new Date().toISOString(),
+    spx_entry: spxPrice,
+    spx_current: spxPrice,
+    option_entry: currentPrice,
+    option_current: currentPrice,
+    option_high: currentPrice,
+    option_low: currentPrice,
+    max_option_price: currentPrice,
+    stop_price: stopPrice,
+    tp1: currentPrice + PROFIT_STEP,
+    tp2: currentPrice + PROFIT_STEP * 2
+  });
+
+  await bot.sendMessage(
+    ADMIN_CHAT_ID,
+    buildActivatedMessage(
+      trade,
+      spxPrice,
+      {
+        oi: getOpenInterest(option),
+        volume: getVolume(option)
+      },
+      currentPrice
+    )
   );
 }
 
@@ -647,7 +800,7 @@ async function manageActiveTrade(trade, contracts, spxPrice) {
   const option = contracts.find(c => getTicker(c) === trade.option_ticker);
 
   if (!option) {
-    console.log('Active option not found in current chain:', trade.option_ticker);
+    console.log('Active option not found:', trade.option_ticker);
     return;
   }
 
@@ -668,7 +821,10 @@ async function manageActiveTrade(trade, contracts, spxPrice) {
   const newHigh = Math.max(oldHigh, currentPrice);
   const newLow = Math.min(oldLow, currentPrice);
 
-  const maxProfitAmount = Math.max(Number(trade.max_profit_amount || 0), newHigh - optionEntry);
+  const oldMaxOptionPrice = Number(trade.max_option_price || optionEntry);
+  const maxOptionPrice = Math.max(oldMaxOptionPrice, newHigh);
+
+  const maxProfitAmount = Math.max(Number(trade.max_profit_amount || 0), maxOptionPrice - optionEntry);
   const maxProfitPct = optionEntry > 0 ? (maxProfitAmount / optionEntry) * 100 : 0;
 
   const lastProfitStep = Number(trade.last_profit_step || 0);
@@ -681,37 +837,55 @@ async function manageActiveTrade(trade, contracts, spxPrice) {
     option_current: currentPrice,
     option_high: newHigh,
     option_low: newLow,
+    max_option_price: maxOptionPrice,
     max_profit_amount: maxProfitAmount,
     max_profit_pct: maxProfitPct
   });
 
+  const updatedTrade = {
+    ...trade,
+    spx_current: spxPrice,
+    option_current: currentPrice,
+    option_high: newHigh,
+    option_low: newLow,
+    max_option_price: maxOptionPrice,
+    max_profit_amount: maxProfitAmount,
+    max_profit_pct: maxProfitPct
+  };
+
   if (currentStep > lastProfitStep) {
     await bot.sendMessage(
       ADMIN_CHAT_ID,
-      buildProfitUpdateMessage(trade, currentPrice, profitAmount, profitPct)
+      buildProfitUpdateMessage(
+        updatedTrade,
+        currentPrice,
+        maxOptionPrice,
+        profitAmount,
+        maxProfitAmount,
+        profitPct
+      )
     );
 
-    await updateTrade(trade.id, {
-      last_profit_step: currentStep
-    });
+    await updateTrade(trade.id, { last_profit_step: currentStep });
   }
 
   if (currentPrice <= Number(trade.stop_price)) {
     await bot.sendMessage(
       ADMIN_CHAT_ID,
-      buildStopMessage(trade, currentPrice, maxProfitAmount, maxProfitPct)
+      buildStopMessage(updatedTrade, currentPrice, maxProfitAmount, maxProfitPct, maxOptionPrice)
     );
 
     await updateTrade(trade.id, {
-      status: 'closed',
+      status: maxProfitAmount > 0 ? 'closed_after_profit' : 'closed_stop',
       option_current: currentPrice,
       spx_current: spxPrice,
       option_high: newHigh,
       option_low: newLow,
+      max_option_price: maxOptionPrice,
       max_profit_amount: maxProfitAmount,
       max_profit_pct: maxProfitPct,
       closed_at: new Date().toISOString(),
-      close_reason: 'stop_loss'
+      close_reason: maxProfitAmount > 0 ? 'stop_after_profit' : 'stop_loss'
     });
   }
 }
@@ -728,14 +902,18 @@ async function runCycle() {
     const spxPrice = await getSPXPrice();
     const contracts = await getSPXOptionsChain();
     const analysis = analyzeSPX(contracts);
-    
+
     console.log('Analysis:', analysis);
 
-    const activeTrade = await getActiveTrade();
+    const existingTrade = await getTradeByStatuses(['watching', 'active']);
 
-    if (activeTrade) {
-      console.log('Managing active trade:', activeTrade.option_ticker);
-      await manageActiveTrade(activeTrade, contracts, spxPrice);
+    if (existingTrade?.status === 'watching') {
+      await manageWatchingTrade(existingTrade, contracts, spxPrice);
+      return;
+    }
+
+    if (existingTrade?.status === 'active') {
+      await manageActiveTrade(existingTrade, contracts, spxPrice);
       return;
     }
 
@@ -748,7 +926,7 @@ async function runCycle() {
       return;
     }
 
-    const signalKey = `${signal.side}-${analysis.decisionLow}-${analysis.decisionHigh}`;
+    const signalKey = `${signal.side}-${analysis.decisionLow}-${analysis.decisionHigh}-${todayDate()}`;
     const now = Date.now();
 
     if (signalKey === lastSignalKey && now - lastSignalAt < SIGNAL_COOLDOWN_MS) {
@@ -759,21 +937,21 @@ async function runCycle() {
     const optionData = selectBestOptionContract(contracts, signal.side, spxPrice);
 
     if (!optionData) {
-      console.log('No suitable option contract found.');
+      console.log('No suitable 0DTE option contract found.');
       return;
     }
 
-    const savedTrade = await saveNewTrade(signal, optionData, spxPrice);
+    const savedTrade = await saveWatchingTrade(signal, optionData, spxPrice, analysis);
 
     lastSignalKey = signalKey;
     lastSignalAt = now;
 
     await bot.sendMessage(
       ADMIN_CHAT_ID,
-      buildTradeMessage(signal, spxPrice, analysis, optionData)
+      buildWatchingMessage(signal, spxPrice, optionData, analysis)
     );
 
-    console.log('New trade saved:', savedTrade.id);
+    console.log('New watching trade saved:', savedTrade.id);
   } catch (err) {
     console.error('ERROR MESSAGE:', err?.message);
     console.error('ERROR DATA:', err?.response?.data);
