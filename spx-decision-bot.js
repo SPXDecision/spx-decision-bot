@@ -312,82 +312,58 @@ function analyzeSPX(contracts) {
 }
 
 function buildTradeDecision(a) {
-console.log('NEW BUILDTRADEDECISION RUNNING');
-  
-  let side = 'NO_TRADE';
-  let score = 0;
-  const reasons = [];
+  console.log('NEW FIXED DECISION RUNNING');
 
   const topCall = a.topCallLiquidity?.[0] || {};
   const topPut = a.topPutLiquidity?.[0] || {};
 
-  const callLiquidity =
-    Number(topCall.callVolume || 0) +
-    Number(topCall.callOI || 0);
+  const callVolume = Number(topCall.callVolume || 0);
+  const putVolume = Number(topPut.putVolume || 0);
 
-  const putLiquidity =
-    Number(topPut.putVolume || 0) +
-    Number(topPut.putOI || 0);
+  const callOI = Number(topCall.callOI || 0);
+  const putOI = Number(topPut.putOI || 0);
 
   const callGamma = Number(topCall.callGammaPower || 0);
   const putGamma = Number(topPut.putGammaPower || 0);
 
-  const callPower = callLiquidity + callGamma;
-  const putPower = putLiquidity + putGamma;
+  console.log('DECISION CALL:', { callVolume, callOI, callGamma });
+  console.log('DECISION PUT:', { putVolume, putOI, putGamma });
 
-  if (callPower > putPower * 1.20) {
-    side = 'CALL';
-    score += 50;
-    reasons.push('أقوى سيولة وقاما لصالح الكول');
-    reasons.push(`Call Strike الأقوى: ${fmt(topCall.strike, 0)}`);
-  }
+  let side = 'NO_TRADE';
+  let score = 0;
+  const reasons = [];
 
-  if (putPower > callPower * 1.20) {
+  const callPower = callVolume + callOI + callGamma;
+  const putPower = putVolume + putOI + putGamma;
+
+  console.log('CALL POWER =', callPower);
+  console.log('PUT POWER =', putPower);
+
+  if (putPower > callPower) {
     side = 'PUT';
-    score += 50;
+    score = 90;
     reasons.push('أقوى سيولة وقاما لصالح البوت');
+    reasons.push(`Put Volume: ${fmt(putVolume, 0)}`);
+    reasons.push(`Put OI: ${fmt(putOI, 0)}`);
+    reasons.push(`Put Gamma Power: ${fmt(putGamma, 0)}`);
     reasons.push(`Put Strike الأقوى: ${fmt(topPut.strike, 0)}`);
   }
 
-  if (side === 'CALL') {
-    if (Number(topCall.callVolume || 0) >= MIN_VOLUME * 10) {
-      score += 20;
-      reasons.push('حجم الكول قوي');
-    }
-
-    if (Number(topCall.callOI || 0) >= MIN_OI) {
-      score += 15;
-      reasons.push('العقود المفتوحة للكول قوية');
-    }
-
-    if (callGamma > putGamma) {
-      score += 15;
-      reasons.push('قاما الكول أقوى من البوت');
-    }
+  if (callPower > putPower) {
+    side = 'CALL';
+    score = 90;
+    reasons.push('أقوى سيولة وقاما لصالح الكول');
+    reasons.push(`Call Volume: ${fmt(callVolume, 0)}`);
+    reasons.push(`Call OI: ${fmt(callOI, 0)}`);
+    reasons.push(`Call Gamma Power: ${fmt(callGamma, 0)}`);
+    reasons.push(`Call Strike الأقوى: ${fmt(topCall.strike, 0)}`);
   }
 
-  if (side === 'PUT') {
-    if (Number(topPut.putVolume || 0) >= MIN_VOLUME * 10) {
-      score += 20;
-      reasons.push('حجم البوت قوي');
-    }
-
-    if (Number(topPut.putOI || 0) >= MIN_OI) {
-      score += 15;
-      reasons.push('العقود المفتوحة للبوت قوية');
-    }
-
-    if (putGamma > callGamma) {
-      score += 15;
-      reasons.push('قاما البوت أقوى من الكول');
-    }
-  }
-
-  if (score < MIN_WATCH_SCORE) {
+  if (side === 'NO_TRADE') {
     return {
       side: 'NO_TRADE',
-      score,
-      reason: `الإشارة ضعيفة، السكور ${score}/100`
+      score: 0,
+      reason: 'لا يوجد تفوق واضح بين الكول والبوت'
     };
   }
 
