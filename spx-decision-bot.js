@@ -39,6 +39,13 @@ const DECISION_NEAR_POINTS = Number(process.env.DECISION_NEAR_POINTS || 15);
 const bot = new TelegramBot(BOT_TOKEN, { polling: false });
 const supabase = createClient(SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY);
 
+bot.sendMessage(
+  ADMIN_CHAT_ID,
+  '✅ SPX Decision Bot شغال الآن\n\nتم تشغيل البوت ومراقبة SPX بدأت.'
+).catch(err => {
+  console.error('START MESSAGE ERROR:', err.message);
+});
+
 let lastSignalKey = '';
 let lastSignalAt = 0;
 let isRunning = false;
@@ -1008,6 +1015,9 @@ async function runCycle() {
   try {
     const spxPrice = await getSPXPrice();
     const contracts = await getSPXOptionsChain();
+
+    console.log('BOT HEARTBEAT | SPX PRICE:', spxPrice);
+    
     const analysis = analyzeSPX(contracts, spxPrice);
 
     console.log('Analysis:', analysis);
